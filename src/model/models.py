@@ -260,7 +260,8 @@ class PixelNeRFNet(torch.nn.Module):
             rgb = mlp_output[..., :3]
             sigma = mlp_output[..., 3:4]
 
-            output_list = [torch.sigmoid(rgb), torch.relu(sigma)]
+            # output_list = [torch.sigmoid(rgb), torch.relu(sigma)]
+            output_list = [torch.sigmoid(rgb), sigma]   # don't apply activation function to sigma here
             output = torch.cat(output_list, dim=-1)
             output = output.reshape(SB, B, -1)
         return output

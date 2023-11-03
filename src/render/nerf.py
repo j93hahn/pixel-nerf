@@ -12,6 +12,13 @@ from torch.nn import DataParallel
 from dotmap import DotMap
 
 
+def compute_density_shift(opacity, delta_z, distance_scale=1.0):
+    opacity = torch.tensor(opacity)
+    delta_z = torch.tensor(delta_z)
+    distance_scale = torch.tensor(distance_scale)
+    return torch.log(torch.log(1 / (1 - opacity))) - torch.log(delta_z * distance_scale)
+
+
 class _RenderWrapper(torch.nn.Module):
     def __init__(self, net, renderer, simple_output):
         super().__init__()
@@ -70,6 +77,9 @@ class NeRFRenderer(torch.nn.Module):
         white_bkgd=False,
         lindisp=False,
         sched=None,  # ray sampling schedule for coarse and fine rays
+        distance_scale=1.0,
+        fea2denseAct='relu',
+        use_density_shift=False,
     ):
         super().__init__()
         self.n_coarse = n_coarse
@@ -81,6 +91,13 @@ class NeRFRenderer(torch.nn.Module):
 
         self.eval_batch_size = eval_batch_size
         self.white_bkgd = white_bkgd
+        self.distance_scale = distance_scale
+        self.fea2denseAct = fea2denseAct
+        self.use_density_shift = use_density_shift
+        if use_density_shift:
+            self.beta = torch.nn.Parameter(torch.tensor(0.1), requires_grad = True)
+            self.density_shift = compute_density_shift(1e-2, 4.9, distance_scale)
+            print(f"Using exp act fn with density shift {self.density_shift} at distance_scaling {distance_scale}")
         self.lindisp = lindisp
         if lindisp:
             print("Using linear displacement rays")
@@ -225,7 +242,25 @@ class NeRFRenderer(torch.nn.Module):
             if self.training and self.noise_std > 0.0:
                 sigmas = sigmas + torch.randn_like(sigmas) * self.noise_std
 
-            alphas = 1 - torch.exp(-deltas * torch.relu(sigmas))  # (B, K)
+            # volumetric rendering done here
+            if self.fea2denseAct == 'relu':
+                if self.use_density_shift:
+                    sigmas *= self.beta
+                    sigmas += self.density_shift
+                sigmas = torch.relu(sigmas)
+            elif self.fea2denseAct == 'exp':
+                if self.use_density_shift:
+                    sigmas *= self.beta
+                    sigmas += self.density_shift
+                sigmas = torch.exp(sigmas)
+            elif self.fea2denseAct == 'softplus':
+                if self.use_density_shift:
+                    sigmas *= self.beta
+                    sigmas += self.density_shift
+                sigmas = F.softplus(sigmas)
+            else:
+                raise NotImplementedError
+            alphas = 1 - torch.exp(-deltas * sigmas * self.distance_scale)  # (B, K)
             deltas = None
             sigmas = None
             alphas_shifted = torch.cat(
@@ -338,7 +373,7 @@ class NeRFRenderer(torch.nn.Module):
             self.last_sched += 1
 
     @classmethod
-    def from_conf(cls, conf, white_bkgd=False, lindisp=False, eval_batch_size=100000):
+    def from_conf(cls, conf, white_bkgd=False, lindisp=False, distance_scale=1.0, fea2denseAct='relu', use_density_shift=False, eval_batch_size=100000):
         return cls(
             conf.get_int("n_coarse", 128),
             conf.get_int("n_fine", 0),
@@ -349,6 +384,9 @@ class NeRFRenderer(torch.nn.Module):
             lindisp=lindisp,
             eval_batch_size=conf.get_int("eval_batch_size", eval_batch_size),
             sched=conf.get_list("sched", None),
+            distance_scale=distance_scale,
+            fea2denseAct=fea2denseAct,
+            use_density_shift=use_density_shift,
         )
 
     def bind_parallel(self, net, gpus=None, simple_output=False):
@@ -360,7 +398,7 @@ class NeRFRenderer(torch.nn.Module):
         :param net A PixelNeRF network
         :param gpus list of GPU ids to parallize to. If length is 1,
         does not parallelize
-        :param simple_output only returns rendered (rgb, depth) instead of the 
+        :param simple_output only returns rendered (rgb, depth) instead of the
         full render output map. Saves data tranfer cost.
         :return torch module
         """

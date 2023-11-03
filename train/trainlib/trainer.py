@@ -3,8 +3,10 @@ import torch
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import tqdm
+import sys
+from tqdm.auto import tqdm as tqdm_auto
 import warnings
-
+from fabric.utils.event import get_event_storage
 
 class Trainer:
     def __init__(self, net, train_dataset, test_dataset, args, conf, device=None):
@@ -149,28 +151,31 @@ class Trainer:
         test_data_iter = data_loop(self.test_data_loader)
 
         step_id = self.start_iter_id
+        metric = get_event_storage()
 
-        progress = tqdm.tqdm(bar_format="[{rate_fmt}] ")
+        # progress = tqdm.tqdm(bar_format="[{rate_fmt}] ")
         for epoch in range(self.num_epochs):
-            self.writer.add_scalar(
-                "lr", self.optim.param_groups[0]["lr"], global_step=step_id
-            )
+            # self.writer.add_scalar(
+            #     "lr", self.optim.param_groups[0]["lr"], global_step=step_id
+            # )
 
             batch = 0
             for _ in range(self.num_epoch_repeats):
                 for data in self.train_data_loader:
                     losses = self.train_step(data, global_step=step_id)
-                    loss_str = fmt_loss_str(losses)
-                    if batch % self.print_interval == 0:
-                        print(
-                            "E",
-                            epoch,
-                            "B",
-                            batch,
-                            loss_str,
-                            " lr",
-                            self.optim.param_groups[0]["lr"],
-                        )
+                    if batch % 10 == 0:
+                        metric.put_scalars(batch=batch, epoch=epoch, train_psnr_f=losses['psnr_f'], train_psnr_c=losses['psnr_c'])
+                    # loss_str = fmt_loss_str(losses)
+                    # if batch % self.print_interval == 0:
+                    #     print(
+                    #         "E",
+                    #         epoch,
+                    #         "B",
+                    #         batch,
+                    #         loss_str,
+                    #         " lr",
+                    #         self.optim.param_groups[0]["lr"],
+                    #     )
 
                     if batch % self.eval_interval == 0:
                         test_data = next(test_data_iter)
@@ -178,15 +183,16 @@ class Trainer:
                         with torch.no_grad():
                             test_losses = self.eval_step(test_data, global_step=step_id)
                         self.net.train()
-                        test_loss_str = fmt_loss_str(test_losses)
-                        self.writer.add_scalars("train", losses, global_step=step_id)
-                        self.writer.add_scalars(
-                            "test", test_losses, global_step=step_id
-                        )
-                        print("*** Eval:", "E", epoch, "B", batch, test_loss_str, " lr")
+                        metric.put_scalars(z_test_psnr_f=test_losses['psnr_f'], z_test_psnr_c=test_losses['psnr_c'])
+                        # test_loss_str = fmt_loss_str(test_losses)
+                        # self.writer.add_scalars("train", losses, global_step=step_id)
+                        # self.writer.add_scalars(
+                        #     "test", test_losses, global_step=step_id
+                        # )
+                        # print("*** Eval:", "E", epoch, "B", batch, test_loss_str, " lr")
 
                     if batch % self.save_interval == 0 and (epoch > 0 or batch > 0):
-                        print("saving")
+                        # print("saving")
                         if self.managed_weight_saving:
                             self.net.save_weights(self.args)
                         else:
@@ -201,33 +207,34 @@ class Trainer:
                         torch.save({"iter": step_id + 1}, self.iter_state_path)
                         self.extra_save_state()
 
-                    if batch % self.vis_interval == 0:
-                        print("generating visualization")
-                        if self.fixed_test:
-                            test_data = next(iter(self.test_data_loader))
-                        else:
-                            test_data = next(test_data_iter)
-                        self.net.eval()
-                        with torch.no_grad():
-                            vis, vis_vals = self.vis_step(
-                                test_data, global_step=step_id
-                            )
-                        if vis_vals is not None:
-                            self.writer.add_scalars(
-                                "vis", vis_vals, global_step=step_id
-                            )
-                        self.net.train()
-                        if vis is not None:
-                            import imageio
+                    # if batch % self.vis_interval == 0:
+                    #     # print("generating visualization")
+                    #     if self.fixed_test:
+                    #         test_data = next(iter(self.test_data_loader))
+                    #     else:
+                    #         test_data = next(test_data_iter)
+                    #     self.net.eval()
+                    #     with torch.no_grad():
+                    #         vis, vis_vals = self.vis_step(
+                    #             test_data, global_step=step_id
+                    #         )
+                    #     if vis_vals is not None:
+                    #         self.writer.add_scalars(
+                    #             "vis", vis_vals, global_step=step_id
+                    #         )
+                    #         metric.put_scalars(vis_psnr=vis_vals['psnr'])
+                    #     self.net.train()
+                    #     if vis is not None:
+                    #         import imageio
 
-                            vis_u8 = (vis * 255).astype(np.uint8)
-                            imageio.imwrite(
-                                os.path.join(
-                                    self.visual_path,
-                                    "{:04}_{:04}_vis.png".format(epoch, batch),
-                                ),
-                                vis_u8,
-                            )
+                    #         vis_u8 = (vis * 255).astype(np.uint8)
+                    #         imageio.imwrite(
+                    #             os.path.join(
+                    #                 self.visual_path,
+                    #                 "{:04}_{:04}_vis.png".format(epoch, batch),
+                    #             ),
+                    #             vis_u8,
+                    #         )
 
                     if (
                         batch == self.num_total_batches - 1
@@ -239,6 +246,7 @@ class Trainer:
                     self.post_batch(epoch, batch)
                     step_id += 1
                     batch += 1
-                    progress.update(1)
+                    metric.step()
+                    # progress.update(1)
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()

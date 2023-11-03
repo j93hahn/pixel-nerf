@@ -72,6 +72,15 @@ def parse_args(
     parser.add_argument(
         "--ray_batch_size", "-R", type=int, default=default_ray_batch_size, help="Ray batch size"
     )
+    parser.add_argument(
+        "--distance_scale", type=float, default=1.0, help="Scale factor for distance"
+    )
+    parser.add_argument(
+        "--fea2denseAct", type=str, default="relu", help="Activation function for fea2dense"
+    )
+    parser.add_argument(
+        "--use_density_shift", action="store_true", default=False, help="Use density shift"
+    )
     if callback is not None:
         parser = callback(parser)
     args = parser.parse_args()

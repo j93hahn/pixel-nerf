@@ -18,6 +18,7 @@ import numpy as np
 import torch.nn.functional as F
 import torch
 from dotmap import DotMap
+from fabric.utils.event import EventStorage
 
 
 def extra_args(parser):
@@ -54,7 +55,8 @@ def extra_args(parser):
 
 
 args, conf = util.args.parse_args(extra_args, training=True, default_ray_batch_size=128)
-device = util.get_cuda(args.gpu_id[0])
+# device = util.get_cuda(args.gpu_id[0])
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 dset, val_dset, _ = get_split_dataset(args.dataset_format, args.datadir)
 print(
@@ -67,7 +69,10 @@ if args.freeze_enc:
     print("Encoder frozen")
     net.encoder.eval()
 
-renderer = NeRFRenderer.from_conf(conf["renderer"], lindisp=dset.lindisp,).to(
+renderer = NeRFRenderer.from_conf(conf["renderer"], lindisp=dset.lindisp,
+                                  distance_scale=args.distance_scale,
+                                  fea2denseAct=args.fea2denseAct,
+                                  use_density_shift=args.use_density_shift).to(
     device=device
 )
 
@@ -210,6 +215,11 @@ class PixelNeRFTrainer(trainlib.Trainer):
             rgb_loss = rgb_loss * self.lambda_coarse + fine_loss * self.lambda_fine
             loss_dict["rf"] = fine_loss.item() * self.lambda_fine
 
+        # compute PSNR
+        coarse_psnr = util.psnr(coarse.rgb, all_rgb_gt)
+        fine_psnr = util.psnr(fine.rgb, all_rgb_gt) if using_fine else 0.0
+        loss_dict.update({"psnr_c": coarse_psnr, "psnr_f": fine_psnr})
+
         loss = rgb_loss
         if is_train:
             loss.backward()
@@ -289,12 +299,12 @@ class PixelNeRFTrainer(trainlib.Trainer):
                 depth_fine_np = fine.depth[0].cpu().numpy().reshape(H, W)
                 rgb_fine_np = fine.rgb[0].cpu().numpy().reshape(H, W, 3)
 
-        print("c rgb min {} max {}".format(rgb_coarse_np.min(), rgb_coarse_np.max()))
-        print(
-            "c alpha min {}, max {}".format(
-                alpha_coarse_np.min(), alpha_coarse_np.max()
-            )
-        )
+        # print("c rgb min {} max {}".format(rgb_coarse_np.min(), rgb_coarse_np.max()))
+        # print(
+        #     "c alpha min {}, max {}".format(
+        #         alpha_coarse_np.min(), alpha_coarse_np.max()
+        #     )
+        # )
         alpha_coarse_cmap = util.cmap(alpha_coarse_np) / 255
         depth_coarse_cmap = util.cmap(depth_coarse_np) / 255
         vis_list = [
@@ -309,12 +319,12 @@ class PixelNeRFTrainer(trainlib.Trainer):
         vis = vis_coarse
 
         if using_fine:
-            print("f rgb min {} max {}".format(rgb_fine_np.min(), rgb_fine_np.max()))
-            print(
-                "f alpha min {}, max {}".format(
-                    alpha_fine_np.min(), alpha_fine_np.max()
-                )
-            )
+            # print("f rgb min {} max {}".format(rgb_fine_np.min(), rgb_fine_np.max()))
+            # print(
+            #     "f alpha min {}, max {}".format(
+            #         alpha_fine_np.min(), alpha_fine_np.max()
+            #     )
+            # )
             depth_fine_cmap = util.cmap(depth_fine_np) / 255
             alpha_fine_cmap = util.cmap(alpha_fine_np) / 255
             vis_list = [
@@ -333,7 +343,7 @@ class PixelNeRFTrainer(trainlib.Trainer):
 
         psnr = util.psnr(rgb_psnr, gt)
         vals = {"psnr": psnr}
-        print("psnr", psnr)
+        # print("psnr", psnr)
 
         # set the renderer network back to train mode
         renderer.train()
@@ -341,4 +351,5 @@ class PixelNeRFTrainer(trainlib.Trainer):
 
 
 trainer = PixelNeRFTrainer()
-trainer.start()
+with EventStorage():
+    trainer.start()
